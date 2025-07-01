@@ -6,6 +6,7 @@
 #include "renderers/LineGraphRenderer.h"
 #include "renderers/FunnelRenderer.h"
 #include "hardware/Input.h"
+#include "../AsyncNetworkManager.h"
 
 
 InsightCard::InsightCard(lv_obj_t* parent, ConfigManager& config, EventQueue& eventQueue,
@@ -17,6 +18,11 @@ InsightCard::InsightCard(lv_obj_t* parent, ConfigManager& config, EventQueue& ev
     , _card(nullptr)
     , _title_label(nullptr)
     , _content_container(nullptr)
+    , _loading_spinner(nullptr)
+    , _error_label(nullptr)
+    , _is_loading(false)
+    , _has_error(false)
+    , _is_showing_cached_data(false)
     , _active_renderer(nullptr)
     , _current_type(InsightParser::InsightType::INSIGHT_NOT_SUPPORTED) {
     
@@ -70,8 +76,14 @@ InsightCard::InsightCard(lv_obj_t* parent, ConfigManager& config, EventQueue& ev
     lv_obj_set_style_pad_all(_content_container, 0, 0);
 
     _event_queue.subscribe([this](const Event& event) {
-        if (event.type == EventType::INSIGHT_DATA_RECEIVED && event.insightId == _insight_id) {
-            this->onEvent(event);
+        if (event.insightId == _insight_id) {
+            if (event.type == EventType::INSIGHT_DATA_RECEIVED) {
+                this->onEvent(event);
+            } else if (event.type == EventType::INSIGHT_DATA_ERROR) {
+                this->onErrorEvent(event);
+            } else if (event.type == EventType::INSIGHT_NETWORK_STATE_CHANGED) {
+                this->onNetworkStateChanged(event);
+            }
         }
     });
 }
@@ -242,4 +254,163 @@ bool InsightCard::handleButtonPress(uint8_t button_index) {
     }
     
     return false; // Not handled, pass to default handler
+}
+
+void InsightCard::onErrorEvent(const Event& event) {
+    Serial.printf("[InsightCard-%s] Error event received: %s\n", _insight_id.c_str(), event.jsonData.c_str());
+    
+    if (globalUIDispatch) {
+        globalUIDispatch([this, error_msg = event.jsonData]() {
+            showErrorState(error_msg);
+        }, true);
+    }
+}
+
+void InsightCard::onNetworkStateChanged(const Event& event) {
+    Serial.printf("[InsightCard-%s] Network state changed: %s\n", _insight_id.c_str(), event.jsonData.c_str());
+    
+    if (globalUIDispatch) {
+        globalUIDispatch([this, state_str = event.jsonData]() {
+            if (state_str == "loading") {
+                showLoadingState(true);
+            } else if (state_str == "success") {
+                showSuccessState();
+            } else if (state_str == "error") {
+                // Error state will be handled by onErrorEvent
+            }
+        }, true);
+    }
+}
+
+void InsightCard::showLoadingState(bool show_spinner) {
+    _is_loading = true;
+    _has_error = false;
+    
+    if (show_spinner && !_loading_spinner) {
+        createLoadingSpinner();
+    }
+    
+    if (_loading_spinner) {
+        lv_obj_clear_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
+        animateOpacityTransition(_loading_spinner, 0, 255, 200);
+    }
+    
+    if (_error_label) {
+        lv_obj_add_flag(_error_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    
+    // Dim existing content if showing cached data
+    if (_is_showing_cached_data && _content_container) {
+        lv_obj_set_style_opa(_content_container, LV_OPA_60, 0);
+    }
+}
+
+void InsightCard::showErrorState(const String& error_message) {
+    _is_loading = false;
+    _has_error = true;
+    
+    if (!_error_label) {
+        createErrorDisplay();
+    }
+    
+    if (_error_label) {
+        lv_label_set_text(_error_label, error_message.c_str());
+        lv_obj_clear_flag(_error_label, LV_OBJ_FLAG_HIDDEN);
+        animateOpacityTransition(_error_label, 0, 255, 200);
+    }
+    
+    if (_loading_spinner) {
+        animateOpacityTransition(_loading_spinner, 255, 0, 200);
+        lv_obj_add_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
+    }
+    
+    // Restore content opacity
+    if (_content_container) {
+        lv_obj_set_style_opa(_content_container, LV_OPA_COVER, 0);
+    }
+}
+
+void InsightCard::showSuccessState() {
+    _is_loading = false;
+    _has_error = false;
+    _is_showing_cached_data = false;
+    
+    if (_loading_spinner) {
+        animateOpacityTransition(_loading_spinner, 255, 0, 200);
+        lv_obj_add_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
+    }
+    
+    if (_error_label) {
+        lv_obj_add_flag(_error_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    
+    // Restore full content opacity with smooth transition
+    if (_content_container) {
+        animateOpacityTransition(_content_container, lv_obj_get_style_opa(_content_container, 0), 255, 300);
+    }
+}
+
+void InsightCard::createLoadingSpinner() {
+    if (!_content_container || _loading_spinner) {
+        return;
+    }
+    
+    // Create a simple loading label instead of complex spinner
+    _loading_spinner = lv_label_create(_content_container);
+    if (_loading_spinner) {
+        lv_obj_set_size(_loading_spinner, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_center(_loading_spinner);
+        lv_label_set_text(_loading_spinner, "Loading...");
+        lv_obj_set_style_text_color(_loading_spinner, lv_color_hex(0x0078D4), 0); // Apple blue
+        lv_obj_set_style_text_font(_loading_spinner, &lv_font_montserrat_14, 0);
+        lv_obj_add_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
+        
+        // Create blinking animation
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, _loading_spinner);
+        lv_anim_set_exec_cb(&a, [](void* var, int32_t v) {
+            lv_obj_set_style_opa((lv_obj_t*)var, v, 0);
+        });
+        lv_anim_set_values(&a, LV_OPA_30, LV_OPA_COVER);
+        lv_anim_set_time(&a, 800);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_playback_time(&a, 400);
+        lv_anim_start(&a);
+    }
+}
+
+void InsightCard::createErrorDisplay() {
+    if (!_content_container || _error_label) {
+        return;
+    }
+    
+    _error_label = lv_label_create(_content_container);
+    if (_error_label) {
+        lv_obj_set_width(_error_label, lv_pct(100));
+        lv_obj_center(_error_label);
+        lv_obj_set_style_text_color(_error_label, lv_color_hex(0xFF3B30), 0); // Apple red
+        lv_obj_set_style_text_font(_error_label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_align(_error_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(_error_label, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(_error_label, "Error loading data");
+        lv_obj_add_flag(_error_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void InsightCard::animateOpacityTransition(lv_obj_t* obj, uint8_t from_opacity, uint8_t to_opacity, uint32_t duration) {
+    if (!obj || !lv_obj_is_valid(obj)) {
+        return;
+    }
+    
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, obj);
+    lv_anim_set_values(&a, from_opacity, to_opacity);
+    lv_anim_set_time(&a, duration);
+    lv_anim_set_exec_cb(&a, [](void* var, int32_t v) {
+        lv_obj_set_style_opa((lv_obj_t*)var, v, 0);
+    });
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
 }
