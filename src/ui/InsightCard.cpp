@@ -240,14 +240,8 @@ bool InsightCard::handleButtonPress(uint8_t button_index) {
         refreshEvent.insightId = _insight_id;
         _event_queue.publishEvent(refreshEvent);
         
-        // Update UI to show we're refreshing
-        if (globalUIDispatch) {
-            globalUIDispatch([this]() {
-                if (isValidObject(_title_label)) {
-                    lv_label_set_text(_title_label, "Refreshing...");
-                }
-            }, true);
-        }
+        // With async networking, no need to show "Refreshing" state
+        // Fresh data will appear seamlessly when available
         
         Serial.printf("[InsightCard-%s] Force refresh requested\n", _insight_id.c_str());
         return true; // Event handled
@@ -260,8 +254,61 @@ void InsightCard::onErrorEvent(const Event& event) {
     Serial.printf("[InsightCard-%s] Error event received: %s\n", _insight_id.c_str(), event.jsonData.c_str());
     
     if (globalUIDispatch) {
-        globalUIDispatch([this, error_msg = event.jsonData]() {
-            showErrorState(error_msg);
+        // Capture necessary objects to ensure they exist when lambda executes
+        lv_obj_t* card_obj = _card;
+        lv_obj_t* error_label = _error_label;
+        lv_obj_t* loading_spinner = _loading_spinner;
+        lv_obj_t* content_container = _content_container;
+        
+        globalUIDispatch([card_obj, error_label, loading_spinner, content_container, error_msg = event.jsonData]() mutable {
+            // Validate that the card still exists before accessing child objects
+            if (!card_obj || !lv_obj_is_valid(card_obj)) {
+                return;
+            }
+            
+            // Create error label if it doesn't exist and content container is valid
+            if (!error_label && content_container && lv_obj_is_valid(content_container)) {
+                error_label = lv_label_create(content_container);
+                if (error_label) {
+                    lv_obj_set_width(error_label, lv_pct(100));
+                    lv_obj_center(error_label);
+                    lv_obj_set_style_text_color(error_label, lv_color_hex(0xFF3B30), 0); // Apple red
+                    lv_obj_set_style_text_font(error_label, &lv_font_montserrat_14, 0);
+                    lv_obj_set_style_text_align(error_label, LV_TEXT_ALIGN_CENTER, 0);
+                    lv_label_set_long_mode(error_label, LV_LABEL_LONG_WRAP);
+                    lv_label_set_text(error_label, "Error loading data");
+                    lv_obj_add_flag(error_label, LV_OBJ_FLAG_HIDDEN);
+                }
+            }
+            
+            // Show error state if error label exists and is valid
+            if (error_label && lv_obj_is_valid(error_label)) {
+                lv_label_set_text(error_label, error_msg.c_str());
+                lv_obj_clear_flag(error_label, LV_OBJ_FLAG_HIDDEN);
+                
+                // Animate opacity transition
+                lv_anim_t a;
+                lv_anim_init(&a);
+                lv_anim_set_var(&a, error_label);
+                lv_anim_set_values(&a, 0, 255);
+                lv_anim_set_time(&a, 200);
+                lv_anim_set_exec_cb(&a, [](void* obj, int32_t v) {
+                    if (obj && lv_obj_is_valid((lv_obj_t*)obj)) {
+                        lv_obj_set_style_opa((lv_obj_t*)obj, (lv_opa_t)v, 0);
+                    }
+                });
+                lv_anim_start(&a);
+            }
+            
+            // Hide loading spinner if it exists and is valid
+            if (loading_spinner && lv_obj_is_valid(loading_spinner)) {
+                lv_obj_add_flag(loading_spinner, LV_OBJ_FLAG_HIDDEN);
+            }
+            
+            // Set content container to full opacity if it exists and is valid
+            if (content_container && lv_obj_is_valid(content_container)) {
+                lv_obj_set_style_opa(content_container, LV_OPA_COVER, 0);
+            }
         }, true);
     }
 }
@@ -269,39 +316,62 @@ void InsightCard::onErrorEvent(const Event& event) {
 void InsightCard::onNetworkStateChanged(const Event& event) {
     Serial.printf("[InsightCard-%s] Network state changed: %s\n", _insight_id.c_str(), event.jsonData.c_str());
     
+    // With async networking, we don't need to show loading states anymore
+    // Data will be updated directly via onEvent when received
     if (globalUIDispatch) {
-        globalUIDispatch([this, state_str = event.jsonData]() {
-            if (state_str == "loading") {
-                showLoadingState(true);
-            } else if (state_str == "success") {
-                showSuccessState();
+        // Capture necessary objects to ensure they exist when lambda executes
+        lv_obj_t* card_obj = _card;
+        lv_obj_t* loading_spinner = _loading_spinner;
+        lv_obj_t* error_label = _error_label;
+        lv_obj_t* content_container = _content_container;
+        
+        globalUIDispatch([card_obj, loading_spinner, error_label, content_container, state_str = event.jsonData]() {
+            // Validate that the card still exists before accessing child objects
+            if (!card_obj || !lv_obj_is_valid(card_obj)) {
+                return;
+            }
+            
+            if (state_str == "success") {
+                // Hide loading spinner if it exists and is valid
+                if (loading_spinner && lv_obj_is_valid(loading_spinner)) {
+                    lv_obj_add_flag(loading_spinner, LV_OBJ_FLAG_HIDDEN);
+                }
+                
+                // Hide error label if it exists and is valid
+                if (error_label && lv_obj_is_valid(error_label)) {
+                    lv_obj_add_flag(error_label, LV_OBJ_FLAG_HIDDEN);
+                }
+                
+                // Set content container to full opacity if it exists and is valid
+                if (content_container && lv_obj_is_valid(content_container)) {
+                    lv_obj_set_style_opa(content_container, LV_OPA_COVER, 0);
+                }
             } else if (state_str == "error") {
                 // Error state will be handled by onErrorEvent
             }
+            // Remove loading state handling since async networking provides immediate data
         }, true);
     }
 }
 
 void InsightCard::showLoadingState(bool show_spinner) {
-    _is_loading = true;
+    // Loading state no longer needed with async networking
+    // Data updates happen immediately with cached data, then fresh data
+    _is_loading = false;
     _has_error = false;
     
-    if (show_spinner && !_loading_spinner) {
-        createLoadingSpinner();
+    // Hide any existing loading UI with proper validation
+    if (_loading_spinner && lv_obj_is_valid(_loading_spinner)) {
+        lv_obj_add_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
     }
     
-    if (_loading_spinner) {
-        lv_obj_clear_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
-        animateOpacityTransition(_loading_spinner, 0, 255, 200);
-    }
-    
-    if (_error_label) {
+    if (_error_label && lv_obj_is_valid(_error_label)) {
         lv_obj_add_flag(_error_label, LV_OBJ_FLAG_HIDDEN);
     }
     
-    // Dim existing content if showing cached data
-    if (_is_showing_cached_data && _content_container) {
-        lv_obj_set_style_opa(_content_container, LV_OPA_60, 0);
+    // Keep content at full opacity with proper validation
+    if (_content_container && lv_obj_is_valid(_content_container)) {
+        lv_obj_set_style_opa(_content_container, LV_OPA_COVER, 0);
     }
 }
 
@@ -313,19 +383,19 @@ void InsightCard::showErrorState(const String& error_message) {
         createErrorDisplay();
     }
     
-    if (_error_label) {
+    if (_error_label && lv_obj_is_valid(_error_label)) {
         lv_label_set_text(_error_label, error_message.c_str());
         lv_obj_clear_flag(_error_label, LV_OBJ_FLAG_HIDDEN);
         animateOpacityTransition(_error_label, 0, 255, 200);
     }
     
-    if (_loading_spinner) {
+    if (_loading_spinner && lv_obj_is_valid(_loading_spinner)) {
         animateOpacityTransition(_loading_spinner, 255, 0, 200);
         lv_obj_add_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
     }
     
-    // Restore content opacity
-    if (_content_container) {
+    // Restore content opacity with proper validation
+    if (_content_container && lv_obj_is_valid(_content_container)) {
         lv_obj_set_style_opa(_content_container, LV_OPA_COVER, 0);
     }
 }
@@ -335,53 +405,29 @@ void InsightCard::showSuccessState() {
     _has_error = false;
     _is_showing_cached_data = false;
     
-    if (_loading_spinner) {
+    if (_loading_spinner && lv_obj_is_valid(_loading_spinner)) {
         animateOpacityTransition(_loading_spinner, 255, 0, 200);
         lv_obj_add_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
     }
     
-    if (_error_label) {
+    if (_error_label && lv_obj_is_valid(_error_label)) {
         lv_obj_add_flag(_error_label, LV_OBJ_FLAG_HIDDEN);
     }
     
     // Restore full content opacity with smooth transition
-    if (_content_container) {
+    if (_content_container && lv_obj_is_valid(_content_container)) {
         animateOpacityTransition(_content_container, lv_obj_get_style_opa(_content_container, 0), 255, 300);
     }
 }
 
 void InsightCard::createLoadingSpinner() {
-    if (!_content_container || _loading_spinner) {
-        return;
-    }
-    
-    // Create a simple loading label instead of complex spinner
-    _loading_spinner = lv_label_create(_content_container);
-    if (_loading_spinner) {
-        lv_obj_set_size(_loading_spinner, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-        lv_obj_center(_loading_spinner);
-        lv_label_set_text(_loading_spinner, "Loading...");
-        lv_obj_set_style_text_color(_loading_spinner, lv_color_hex(0x0078D4), 0); // Apple blue
-        lv_obj_set_style_text_font(_loading_spinner, &lv_font_montserrat_14, 0);
-        lv_obj_add_flag(_loading_spinner, LV_OBJ_FLAG_HIDDEN);
-        
-        // Create blinking animation
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, _loading_spinner);
-        lv_anim_set_exec_cb(&a, [](void* var, int32_t v) {
-            lv_obj_set_style_opa((lv_obj_t*)var, v, 0);
-        });
-        lv_anim_set_values(&a, LV_OPA_30, LV_OPA_COVER);
-        lv_anim_set_time(&a, 800);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_playback_time(&a, 400);
-        lv_anim_start(&a);
-    }
+    // Loading spinner no longer needed with async networking
+    // Progressive loading provides immediate data display
+    return;
 }
 
 void InsightCard::createErrorDisplay() {
-    if (!_content_container || _error_label) {
+    if (!_content_container || !lv_obj_is_valid(_content_container) || _error_label) {
         return;
     }
     
